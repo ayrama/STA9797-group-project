@@ -1,0 +1,18 @@
+---
+title: "STA9797_Group_Project_Code"
+author: "Brandon Kokin, Ayrat Aymetov, MohammedSaadma Chowdhury"
+date: "`r Sys.Date()`"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+# Load the dataset
+df <- read.csv("data/AmesHousing.csv")
+
+# Print the first few rows
+head(df)
+```
