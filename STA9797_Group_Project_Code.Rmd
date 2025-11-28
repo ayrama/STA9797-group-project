@@ -1,6 +1,6 @@
 ---
 title: "STA9797_Group_Project_Code"
-author: "Brandon Kokin, Ayrat Aymetov, MohammedSaadma Chowdhury"
+author: "Brandon Kokin, Ayrat Aymetov, Mohammed Saadman Chowdhury"
 date: "`r Sys.Date()`"
 output: pdf_document
 ---
