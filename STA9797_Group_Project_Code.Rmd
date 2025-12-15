@@ -11,8 +11,459 @@ knitr::opts_chunk$set(echo = TRUE)
 
 ```{r}
 # Load the dataset
-df <- read.csv("data/AmesHousing.csv")
+AmesHousing <- read.csv("data/AmesHousing.csv")
 
 # Print the first few rows
-head(df)
+head(AmesHousing)
+```
+
+Setup and basic preparation
+
+```{R}
+set.seed(123)
+
+str(AmesHousing)
+
+summary(AmesHousing$SalePrice)
+```
+Distribution of SalePrice (raw scale)
+
+```{r}
+hist(
+AmesHousing$SalePrice,
+breaks = 50,
+main = "Distribution of SalePrice",
+xlab = "SalePrice"
+)
+```
+Initial linear model using raw SalePrice
+
+```{r}
+ols_initial <- lm(
+SalePrice ~ Gr.Liv.Area + Total.Bsmt.SF + Garage.Area +
+Lot.Area + Overall.Qual + Overall.Cond +
+Year.Built + Year.Remod.Add +
+Neighborhood,
+data = AmesHousing
+)
+
+summary(ols_initial)
+```
+Diagnostics for initial SalePrice model
+
+```{r}
+par(mfrow = c(2, 2))
+plot(ols_initial)
+par(mfrow = c(1, 1))
+```
+Log transformation of SalePrice
+
+```{r}
+AmesHousing$logSalePrice <- log(AmesHousing$SalePrice)
+hist(
+AmesHousing$logSalePrice,
+breaks = 50,
+main = "Distribution of log(SalePrice)",
+xlab = "log(SalePrice)"
+)
+```
+Linear model using log(SalePrice)
+
+```{r}
+ols_log <- lm(
+logSalePrice ~ Gr.Liv.Area + Total.Bsmt.SF + Garage.Area +
+Lot.Area + Overall.Qual + Overall.Cond +
+Year.Built + Year.Remod.Add +
+Neighborhood,
+data = AmesHousing
+)
+
+summary(ols_log)
+```
+Diagnostics for log-transformed model
+```{r}
+par(mfrow = c(2, 2))
+plot(ols_log)
+par(mfrow = c(1, 1))
+```
+ANOVA for categorical predictors (log scale)
+
+```{r}
+anova_neighborhood <- aov(
+logSalePrice ~ Neighborhood,
+data = AmesHousing
+)
+summary(anova_neighborhood)
+```
+```{r}
+anova_quality <- aov(
+logSalePrice ~ factor(Overall.Qual),
+data = AmesHousing
+)
+summary(anova_quality)
+```
+Final OLS model (log SalePrice)
+
+```{r}
+library(car)
+
+final_ols <- lm(
+logSalePrice ~ Gr.Liv.Area + Total.Bsmt.SF + Garage.Area +
+Lot.Area + TotRms.AbvGrd + Overall.Qual + Overall.Cond +
+Year.Built + Year.Remod.Add +
+Neighborhood + House.Style + Bldg.Type + Sale.Condition,
+data = AmesHousing
+)
+
+summary(final_ols)
+vif(final_ols)
+```
+Examine statistical significance of predictors
+
+```{r}
+#Extract coefficient table
+
+ols_coef_table <- summary(final_ols)$coefficients
+
+#View predictors with p-values
+
+ols_coef_table[, "Pr(>|t|)"]
+
+#Identify predictors significant at 5% level
+
+significant_predictors <- rownames(ols_coef_table)[
+ols_coef_table[, "Pr(>|t|)"] < 0.05
+]
+
+significant_predictors
+```
+Reduced OLS model using statistically significant predictors
+```{r}
+final_ols_reduced <- lm(
+logSalePrice ~ Gr.Liv.Area + Total.Bsmt.SF + Garage.Area +
+Lot.Area + Overall.Qual + Overall.Cond +
+Year.Built + Year.Remod.Add +
+Neighborhood + Bldg.Type + Sale.Condition,
+data = AmesHousing
+)
+
+summary(final_ols_reduced)
+vif(final_ols_reduced)
+```
+OLS diagnostics (final_ols_reduced)
+
+```{r}
+par(mfrow = c(2, 2))
+plot(final_ols_reduced)
+par(mfrow = c(1, 1))
+```
+Construct binary response: AboveExpected
+
+```{r}
+model_data <- model.frame(final_ols_reduced)
+
+model_data$SalePrice_obs <- exp(model_data$logSalePrice)
+model_data$FittedPrice <- exp(fitted(final_ols_reduced))
+
+model_data$AboveExpected <- ifelse(
+model_data$SalePrice_obs > model_data$FittedPrice, 1, 0
+)
+
+table(model_data$AboveExpected)
+prop.table(table(model_data$AboveExpected))
+```
+Logistic regression model
+
+```{r}
+final_logit <- glm(
+AboveExpected ~ Gr.Liv.Area + Total.Bsmt.SF + Garage.Area +
+Lot.Area + Overall.Qual + Overall.Cond +
+Year.Built + Year.Remod.Add +
+Neighborhood + Bldg.Type + Sale.Condition,
+family = binomial,
+data = model_data
+)
+
+summary(final_logit)
+```
+Odds ratios
+
+```{r}
+or_table <- exp(
+cbind(
+OR = coef(final_logit),
+confint.default(final_logit)
+)
+)
+
+or_table
+```
+
+Odds ratio visualization (forest plot)
+
+```{r}
+library(ggplot2)
+
+# Create odds ratio data frame
+or_df <- data.frame(
+  term  = rownames(or_table),
+  OR    = or_table[, 1],
+  lower = or_table[, 2],
+  upper = or_table[, 3]
+)
+
+# Remove intercept
+or_df <- or_df[or_df$term != "(Intercept)", ]
+
+# Remove non-finite or extreme confidence intervals
+or_df <- or_df[
+  is.finite(or_df$OR) &
+  is.finite(or_df$lower) &
+  is.finite(or_df$upper) &
+  or_df$lower > 0 &
+  or_df$upper < 100,
+]
+
+# OPTIONAL but recommended: keep only statistically significant predictors
+or_df <- or_df[!(or_df$lower <= 1 & or_df$upper >= 1), ]
+
+# Forest plot of odds ratios
+ggplot(or_df, aes(x = OR, y = reorder(term, OR))) +
+  geom_point(size = 2) +
+  geom_errorbarh(aes(xmin = lower, xmax = upper), height = 0.2) +
+  geom_vline(xintercept = 1, linetype = "dashed") +
+  scale_x_log10() +
+  labs(
+    title = "Odds Ratios for Selling Above Expected Price",
+    x = "Odds Ratio (log scale)",
+    y = "Predictor"
+  ) +
+  theme_minimal()
+```
+
+
+Bootstrap: OLS coefficient (Gr.Liv.Area)
+
+```{r}
+library(boot)
+
+set.seed(123)
+B <- 1000
+
+ols_data <- model.frame(final_ols)
+X <- model.matrix(final_ols, data = ols_data)
+y <- ols_data$logSalePrice
+
+boot_ols <- function(data, indices) {
+X_b <- X[indices, , drop = FALSE]
+y_b <- y[indices]
+fit <- lm.fit(x = X_b, y = y_b)
+fit$coefficients
+}
+
+boot_ols_results <- boot(
+data = ols_data,
+statistic = boot_ols,
+R = B
+)
+
+idx_grliv <- which(names(coef(final_ols)) == "Gr.Liv.Area")
+
+boot.ci(
+boot.out = boot_ols_results,
+type = "perc",
+index = idx_grliv
+)
+```
+Bootstrap: Logistic regression
+
+```{r}
+B <- 1000
+
+# Fit final logistic regression model
+final_logit <- glm(
+  AboveExpected ~ Gr.Liv.Area + Total.Bsmt.SF + Garage.Area +
+    Lot.Area + Overall.Qual + Overall.Cond +
+    Year.Built + Year.Remod.Add +
+    Neighborhood + Bldg.Type + Sale.Condition,
+  family = binomial,
+  data = model_data
+)
+
+# Store full coefficient names to enforce fixed length
+logit_coef_names <- names(coef(final_logit))
+
+# Define bootstrap statistic function
+boot_logit <- function(data, indices) {
+  
+  # Resample rows
+  d <- data[indices, ]
+  
+  # Refit logistic model
+  fit <- glm(
+    AboveExpected ~ Gr.Liv.Area + Total.Bsmt.SF + Garage.Area +
+      Lot.Area + Overall.Qual + Overall.Cond +
+      Year.Built + Year.Remod.Add +
+      Neighborhood + Bldg.Type + Sale.Condition,
+    family = binomial,
+    data = d
+  )
+  
+  # Initialize fixed-length coefficient vector
+  beta_full <- rep(NA, length(logit_coef_names))
+  names(beta_full) <- logit_coef_names
+  
+  # Extract coefficients
+  beta_hat <- coef(fit)
+  
+  # Align by name
+  beta_full[names(beta_hat)] <- beta_hat
+  
+  # Return numeric vector
+  return(beta_full)
+}
+
+# Run bootstrap
+boot_logit_results <- boot(
+  data = model_data,
+  statistic = boot_logit,
+  R = B
+)
+
+# Sanity checks
+dim(boot_logit_results$t)
+length(boot_logit_results$t0)
+```
+
+Percentile Bootstrap CI for Overall.Qual
+
+```{r}
+#Locate coefficient index
+
+idx_qual <- which(logit_coef_names == "Overall.Qual")
+
+#Percentile confidence interval (log-odds scale)
+
+boot_ci_qual <- boot.ci(
+boot.out = boot_logit_results,
+type = "perc",
+index = idx_qual
+)
+
+boot_ci_qual
+
+#Convert to odds ratio scale
+
+#Point estimate
+
+or_hat <- exp(coef(final_logit)["Overall.Qual"])
+
+#Percentile CI on odds ratio scale
+
+ci_log <- boot_ci_qual$percent[4:5]
+exp(c(or_hat, ci_log))
+```
+Predicting whether a home sells at a premium or a discount
+
+```{r}
+model_data <- model.frame(final_ols_reduced)
+
+model_data$SalePrice_obs <- exp(model_data$logSalePrice)
+model_data$ExpectedPrice <- exp(fitted(final_ols_reduced))
+
+model_data$AboveExpected <- ifelse(
+model_data$SalePrice_obs > model_data$ExpectedPrice, 1, 0
+)
+
+#Fit final logistic regression classifier
+final_logit <- glm(
+AboveExpected ~ Gr.Liv.Area + Total.Bsmt.SF + Garage.Area +
+Lot.Area + Overall.Qual + Overall.Cond +
+Year.Built + Year.Remod.Add +
+Neighborhood + Bldg.Type + Sale.Condition,
+family = binomial,
+data = model_data
+)
+
+summary(final_logit)
+
+#Generate predicted probabilities
+model_data$prob_premium <- predict(
+final_logit,
+type = "response"
+)
+
+#Classify using a 0.50 probability cutoff
+model_data$predicted_class <- ifelse(
+model_data$prob_premium >= 0.5, 1, 0
+)
+```
+
+Evaluate classification performance
+
+```{r}
+#Confusion matrix
+
+confusion_matrix <- table(
+Actual = model_data$AboveExpected,
+Predicted = model_data$predicted_class
+)
+confusion_matrix
+
+#Accuracy
+
+accuracy <- mean(model_data$AboveExpected == model_data$predicted_class)
+accuracy
+
+#Sensitivity (true positive rate: premium correctly identified)
+
+sensitivity <- confusion_matrix["1","1"] / sum(confusion_matrix["1",])
+sensitivity
+
+#Specificity (true negative rate: discount correctly identified)
+
+specificity <- confusion_matrix["0","0"] / sum(confusion_matrix["0",])
+specificity
+```
+
+ROC curve and AUC (model reliability)
+
+```{r}
+library(pROC)
+
+roc_obj <- roc(
+response = model_data$AboveExpected,
+predictor = model_data$prob_premium
+)
+
+auc_value <- auc(roc_obj)
+auc_value
+
+plot(
+roc_obj,
+main = "ROC Curve: Predicting Sale Price Premium vs Discount",
+col = "blue",
+lwd = 2
+)
+abline(a = 0, b = 1, lty = 2, col = "gray")
+```
+
+Example: Interpretable prediction for a single home
+
+```{r}
+example_home <- model_data[1, ]
+
+example_prob <- predict(
+final_logit,
+newdata = example_home,
+type = "response"
+)
+
+example_prob
+
+if (example_prob >= 0.5) {
+"Predicted to sell at a premium"
+} else {
+"Predicted to sell at a discount"
+}
 ```
