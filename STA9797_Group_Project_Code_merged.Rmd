@@ -1,0 +1,733 @@
+---
+title: "STA9797_Group_Project_Code"
+author: "Brandon Kokin, Ayrat Aymetov, Mohammed Saadman Chowdhury"
+date: "`r Sys.Date()`"
+output:
+  word_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+if (!requireNamespace("pROC", quietly = TRUE)) {
+  install.packages("pROC")
+}
+
+if (!requireNamespace("car", quietly = TRUE)) {
+  install.packages("car")
+}
+
+library(ggplot2)
+library(dplyr)
+library(pROC)
+library(car)
+
+set.seed(123)
+```
+
+
+## Module 1: Data Preprocessing
+
+### Loading data, cleaning, and preparatory EDA
+
+```{r}
+# Loading data, data cleaning, and preparatory Exploratory Data Analysis
+# Setup and basic preparation
+AmesHousing <- read.csv("data/AmesHousing.csv")
+
+dim(AmesHousing)  # 2930 rows and 82 columns, so very high dimensions make the analysis a bit complex in nature
+head(AmesHousing) # head not very useful for types; we'll rely on str() and later cleaning
+str(AmesHousing)  # SalePrice is int; OK (R will treat as numeric in modeling)
+```
+
+Notice our hypothesized primary and secondary sources of variation based on theory
+Primary : Neighborhood, Overall Quality, Above-ground living area
+Secondary: Basement Area, Garage Space, Architectural Styl
+
+Note Overall_Qual is actually Ordinal so we elect to change the data type
+Note Overall_Cond is actually Ordinal so we elect to change the data type
+Note Exter_Cond is actually Ordinal so we elect to change the data type and can also potentially reinput it as a source of variation
+Note Bsmt_Cond is actually Ordinal so we elect to change the data type and can also potentially reinput it as a source of variation
+we may elect to create a new dataframe with all these to make our analysis smoother, not decided
+
+```{r}
+# Quick numeric sanity check on the response
+summary(AmesHousing$SalePrice)
+```
+
+### Theory-driven sources of variation
+```{r}
+# Primary sources of variation
+primary_vars <- c("Neighborhood", "Overall.Qual", "Gr.Liv.Area")
+
+# Secondary sources of variation
+secondary_vars <- c("Total.Bsmt.SF", "Garage.Cars", "House.Style")
+
+# Ordinal variables flagged for later recoding
+ordinal_vars <- c("Overall.Qual", "Overall.Cond", "Exter.Cond", "Bsmt.Cond")
+```
+
+### Factor level counts
+```{r}
+factor_levels <- c()
+
+for (var_name in names(AmesHousing)) {
+  x <- AmesHousing[[var_name]]
+  
+  # count levels for factor OR character
+  if (is.factor(x)) {
+    factor_levels[var_name] <- nlevels(x)
+  } else if (is.character(x)) {
+    factor_levels[var_name] <- length(unique(x))
+  }
+}
+
+factor_levels <- sort(factor_levels, decreasing = TRUE)
+factor_levels
+```
+
+```{r}
+# Checks
+length(AmesHousing$Neighborhood)
+length(unique(AmesHousing$Neighborhood))
+head(factor_levels)
+which.max(factor_levels) # Neighborhood
+```
+Neighborhood has substantially higher cardinality than other categorical
+variables, confirming it as a major structural source of variation and
+motivating careful treatment in regression modeling.
+
+### Ordinal recoding (quality variables)
+1–10 scales: keep as numeric (already ordinal)
+Overall.Qual, Overall.Cond → DO NOTHING (correct as-is)
+Quality-grade variables: recode to ordered factors
+Ames quality order (worst → best)
+```{r}
+qual_levels <- c("Po", "Fa", "TA", "Gd", "Ex")
+
+AmesHousing$Exter.Cond <- factor(
+AmesHousing$Exter.Cond,
+levels = qual_levels,
+ordered = TRUE
+)
+
+AmesHousing$Bsmt.Cond <- factor(
+AmesHousing$Bsmt.Cond,
+levels = qual_levels,
+ordered = TRUE
+)
+```
+
+#### SalePrice distribution checks and transformation
+```{r}
+hist(AmesHousing$SalePrice,
+     breaks = 50,
+     main = "Histogram of SalePrice",
+     xlab = "SalePrice")                      # clearly this is skewed
+
+# Log-scale version
+hist(log(AmesHousing$SalePrice),
+     breaks = 50,
+     main = "Histogram of log(SalePrice)",
+     xlab = "log(SalePrice)")                 # much better for normal approximations
+```
+#### Justification for log(SalePrice) transformation
+```{r}
+# Coefficient of variation comparison
+sd(AmesHousing$SalePrice) / mean(AmesHousing$SalePrice)
+sd(log(AmesHousing$SalePrice)) / mean(log(AmesHousing$SalePrice))
+
+```
+The raw SalePrice distribution is strongly right-skewed, with increasing variance at higher price levels, violating the constant variance assumption of OLS regression. A logarithmic transformation reduces skewness and stabilizes variance, yielding a distribution more appropriate for linear modeling. Accordingly, all subsequent analyses use log(SalePrice) as the response variable.
+
+
+
+#### Preparing data for Analysis procedures
+```{r}
+AmesHousing <- AmesHousing |> mutate(logSalePrice = log10(SalePrice))
+```
+
+#### Response missingness and structural missingness handling
+Observations with missing SalePrice cannot be used in
+supervised modeling (OLS, ANOVA, logistic regression).
+Such rows are removed if present.
+```{r}
+AmesHousing <- AmesHousing |>
+  filter(!is.na(SalePrice))
+
+sum(is.na(AmesHousing$SalePrice))  # should be 0
+```
+
+#### Handle structural missingness (do NOT drop observations)
+For Ames housing data, missing basement or garage values
+indicate the absence of that feature, not missing data.
+Replacing NA with 0 preserves information and avoids
+biased row deletion in downstream OLS analysis.
+```{r}
+AmesHousing <- AmesHousing |>
+mutate(
+Total.Bsmt.SF = ifelse(is.na(Total.Bsmt.SF), 0, Total.Bsmt.SF),
+Garage.Cars = ifelse(is.na(Garage.Cars), 0, Garage.Cars)
+)
+
+sapply(
+AmesHousing[c("Total.Bsmt.SF", "Garage.Cars")],
+function(x) sum(is.na(x))
+)
+```
+
+## Module 2: OLS Regression — Primary + Secondary Predictors
+#### Model specification
+```{r}
+AmesHousing$Neighborhood <- factor(AmesHousing$Neighborhood)
+
+ols_model <- lm(
+  logSalePrice ~ Neighborhood +
+    Overall.Qual +
+    Gr.Liv.Area +
+    Total.Bsmt.SF +
+    Garage.Cars +
+    House.Style,
+  data = AmesHousing
+)
+
+#Model summary
+summary(ols_model)
+```
+The OLS model explains a large proportion of variability in logSalePrice
+(Adjusted R² ≈ 0.84). Key structural predictors such as Overall.Qual and
+Gr.Liv.Area are highly statistically significant, supporting the use of
+this model as a baseline for defining relative over- and under-performance.
+
+#### Fitted values and residuals
+```{r}
+AmesHousing$fitted_logPrice <- fitted(ols_model)
+AmesHousing$residuals_log   <- resid(ols_model)
+```
+The OLS results indicate that logSalePrice is strongly explained by
+structural characteristics and location. Overall.Qual and Gr.Liv.Area
+exhibit the largest t-statistics, confirming them as dominant drivers
+of housing prices.
+
+Neighborhood effects remain significant even after controlling for
+quality and size, indicating location-specific price premia beyond
+physical attributes.
+
+Several neighborhood indicators are statistically significant, with
+both positive and negative effects relative to the reference category
+(Blmngtn). This suggests meaningful spatial heterogeneity in housing
+prices that is not fully explained by observable structural features.
+
+Most House.Style categories are not statistically significant once
+size, quality, and neighborhood are accounted for, indicating that
+architectural style contributes limited additional explanatory power
+beyond core structural characteristics.
+
+#### Reference neighborhood
+```{r}
+levels(AmesHousing$Neighborhood)
+```
+Blmngtn is the reference neighborhood in the OLS model, and all
+neighborhood coefficients are interpreted relative to this baseline.
+
+```{r}
+# Multicollinearity check (VIF)
+vif(ols_model)
+```
+The Variance Inflation Factors (GVIF-adjusted for terms with multiple degrees of freedom) all come in below standard cutoffs, so there's no sign of serious multicollinearity issues between the predictors. This means the coefficient estimates from the OLS model should be stable and we can interpret them reliably.
+
+### Module 2B: Interaction Check (Neighborhood × Overall.Qual)
+
+```{r}
+ols_interaction <- lm(
+  logSalePrice ~ Neighborhood * Overall.Qual +
+    Gr.Liv.Area +
+    Total.Bsmt.SF +
+    Garage.Cars +
+    House.Style,
+  data = AmesHousing
+)
+
+summary(ols_interaction)
+```
+
+Baseline OLS model retained for defining expected price.
+Interaction terms were explored but not adopted due to
+limited interpretability and model stability concerns.
+
+### Module 2C: ANOVA (Type II) for OLS Model
+```{r}
+Anova(ols_model, type = 2)
+```
+
+*ANOVA (Type II) Interpretation*
+
+The Type II ANOVA assesses the marginal contribution of each predictor
+after accounting for all other variables in the model.
+
+
+Neighborhood is highly statistically significant (p < 2e-16),
+confirming strong location-based differences in housing prices.
+
+
+Overall.Qual has the largest F-statistic, indicating it is the
+single most important predictor of log(SalePrice).
+
+
+Gr.Liv.Area, Total.Bsmt.SF, and Garage.Cars are all highly significant,
+supporting the role of size and functional space in determining prices.
+
+
+House.Style is statistically significant as a group (p < 0.001),
+although individual style coefficients may be weak, indicating that
+architectural style contributes modest but non-negligible variation
+when cons
+
+### Module 2D: One-Way ANOVA (Neighborhood Only)
+
+```{r}
+anova_neighborhood <- aov(
+  logSalePrice ~ Neighborhood,
+  data = AmesHousing
+)
+
+summary(anova_neighborhood)
+```
+
+*One-Way ANOVA Interpretation (Neighborhood Only)*
+
+The one-way ANOVA tests whether mean log(SalePrice) differs across
+neighborhoods without controlling for other structural variables.
+
+
+The F-statistic is very large (F ≈ 150) with p < 2e-16, providing
+overwhelming evidence that average housing prices differ significantly
+across neighborhoods.
+
+
+This confirms Neighborhood as a dominant source of variation in housing
+prices and motivates its inclusion in the multivariable OLS model.
+
+### Module 2E: Post-hoc Comparisons (Tukey HSD)
+
+```{r}
+tukey_neighborhood <- TukeyHSD(anova_neighborhood)
+tukey_neighborhood
+```
+A one-way ANOVA followed by Tukey's HSD was used to compare
+mean log(SalePrice) across all neighborhoods while controlling
+the family-wise error rate across multiple pairwise comparisons.
+
+
+The results reveal substantial heterogeneity in housing prices
+across neighborhoods. Many pairwise differences are statistically
+significant, indicating that neighborhood-level price effects are
+widespread rather than isolated.
+
+
+Relative to Blmngtn (the OLS reference neighborhood), several
+neighborhoods (e.g., NoRidge, NridgHt, StoneBr) have significantly
+higher mean log(SalePrice), while others (e.g., BrDale, MeadowV,
+IDOTRR) have significantly lower mean log(SalePrice).
+
+
+These post-hoc results complement the OLS findings by illustrating
+the magnitude and direction of neighborhood price differences in
+an unconditional setting.
+
+```{r}
+boxplot(
+  logSalePrice ~ Neighborhood,
+  data = AmesHousing,
+  las = 2,
+  main = "Distribution of log(SalePrice) by Neighborhood",
+  ylab = "log10(SalePrice)"
+)
+```
+
+*Boxplot Interpretation*
+
+The boxplot reveals substantial differences in the distribution of
+log(SalePrice) across neighborhoods. Median prices vary widely, with
+neighborhoods such as NoRidge, NridgHt, StoneBr, and Somerst exhibiting
+notably higher typical prices, while BrDale, MeadowV, IDOTRR, and OldTown
+are among the lowest.
+
+
+The limited overlap between several neighborhood distributions visually
+supports the highly significant one-way ANOVA and the Tukey HSD results,
+indicating that many pairwise neighborhood differences are economically
+and statistically meaningful.
+
+
+At the same time, noticeable within-neighborhood variability and the
+presence of outliers suggest that neighborhood alone does not fully
+explain housing prices, motivating the inclusion of structural and
+quality-related covariates in the multivariable OLS model.
+
+##  Module 3: Construct AboveExpected indicator
+```{r}
+AmesHousing$AboveExpected <-
+  as.integer(AmesHousing$logSalePrice > AmesHousing$fitted_logPrice)
+
+# Quick check
+table(AmesHousing$AboveExpected)
+```
+
+## Module 4: OLS Diagnostics
+
+### Residuals vs Fitted Values
+
+```{r}
+plot(
+  ols_model$fitted.values,
+  ols_model$residuals,
+  xlab = "Fitted log(SalePrice)",
+  ylab = "Residuals",
+  main = "Residuals vs Fitted Values"
+)
+abline(h = 0, col = "red", lwd = 2)
+```
+
+*Diagnostic check: Residuals vs Fitted Values*
+
+Residuals are densely clustered around zero with no clear curvature,
+indicating that the linearity assumption is reasonable.
+The spread of residuals appears roughly constant across fitted values,
+suggesting no strong evidence of heteroscedasticity after log transformation.
+A small number of outlying residuals are present, which is expected in
+cross-sectional housing data and does not invalidate the OLS model.
+
+### Module 4B: Normal Q–Q Plot (Normality of Residuals)
+```{r}
+qqnorm(
+  ols_model$residuals,
+  main = "Normal Q–Q Plot of OLS Residuals"
+)
+qqline(ols_model$residuals, col = "red", lwd = 2)
+```
+
+*Diagnostic check: Normal Q–Q Plot*
+
+Residuals follow the reference line closely in the central region,
+indicating approximate normality. Deviations occur primarily in the
+lower and upper tails, reflecting a small number of extreme observations.
+Given the large sample size, these tail deviations are expected and do
+not materially violate the normality assumption for OLS inference.
+
+### Module 4C: Influence & Leverage (Cook's Distance)
+```{r}
+plot(
+  cooks.distance(ols_model),
+  type = "h",
+  main = "Cook's Distance for OLS Model",
+  ylab = "Cook's Distance",
+  xlab = "Observation Index"
+)
+abline(h = 4 / nrow(AmesHousing), col = "red", lwd = 2)
+```
+
+*Diagnostic check: Cook's Distance*
+
+The Cook's Distance plot shows that most observations have very low
+influence on the fitted model. A small number of observations exceed
+the reference threshold (4/n), indicating potentially influential
+points. These appear as isolated spikes rather than a widespread
+pattern, suggesting that no single observation unduly drives the
+overall regression results.
+
+## Module 5: Logistic Regression for AboveExpected
+
+```{r}
+logit_model <- glm(
+  AboveExpected ~ Neighborhood +
+    Overall.Qual +
+    Gr.Liv.Area +
+    Total.Bsmt.SF +
+    Garage.Cars +
+    House.Style,
+  data = AmesHousing,
+  family = binomial(link = "logit")
+)
+
+summary(logit_model)
+```
+
+*Logistic regression Interpretation*
+
+The logistic model estimates the probability that a home sells above
+its OLS-predicted value. Most Neighborhood indicators are not strongly
+significant once the baseline expected price is accounted for, which
+is expected given that Neighborhood effects were already absorbed by
+the OLS fitted values.
+
+
+Overall.Qual has a statistically significant negative coefficient,
+indicating that higher-quality homes are less likely to exceed their
+predicted price, as quality is already strongly incorporated into the
+expected value benchmark.
+
+
+Total.Bsmt.SF is positive and statistically significant, suggesting
+that basement area contributes to upside deviations beyond what is
+captured by the OLS model.
+
+
+Other structural variables (Gr.Liv.Area, Garage.Cars, House.Style)
+show limited additional explanatory power for AboveExpected status.
+
+### Module 5B: Predicted Probabilities and Classification
+```{r}
+# Compute predicted probabilities from the logistic model
+AmesHousing$prob_AboveExpected <- predict(
+  logit_model,
+  type = "response"
+)
+
+# Inspect range of predicted probabilities
+summary(AmesHousing$prob_AboveExpected)
+```
+*Diagnostic check: Predicted probabilities*
+
+The predicted probabilities span a wide range, from values near 0 to
+values close to 1, indicating that the logistic model provides meaningful
+discrimination between homes that sell above versus below their expected
+value. The median and mean probabilities are close to 0.5, which is
+consistent with the relatively balanced AboveExpected outcome.
+
+### Module 5C: Classification Using 0.5 Cutoff
+```{r}
+# Classify AboveExpected based on predicted probability
+AmesHousing$pred_class_0.5 <-
+  as.integer(AmesHousing$prob_AboveExpected >= 0.5)
+
+# Confusion matrix
+cm <- table(
+  Predicted = AmesHousing$pred_class_0.5,
+  Actual    = AmesHousing$AboveExpected
+)
+
+cm
+```
+
+```{r}
+# Extract counts programmatically
+TN <- cm["0", "0"]
+FP <- cm["1", "0"]
+FN <- cm["0", "1"]
+TP <- cm["1", "1"]
+
+# Compute metrics
+accuracy  <- (TP + TN) / sum(cm)
+sensitivity <- TP / (TP + FN)
+specificity <- TN / (TN + FP)
+
+accuracy
+sensitivity
+specificity
+```
+
+*Diagnostic check: Classification performance at 0.5 cutoff*
+
+The classifier achieves moderate overall accuracy.
+Sensitivity is relatively high, indicating good ability to
+identify homes that sell above their expected value.
+Specificity is lower, indicating weaker performance in
+identifying homes that do not sell above expected value.
+This asymmetry reflects the balanced but noisy nature of
+price deviations around the expected benchmark.
+
+### Module 5D: ROC Curve and AUC
+```{r}
+# ROC object using true labels and predicted probabilities
+roc_obj <- roc(
+  response  = AmesHousing$AboveExpected,
+  predictor = AmesHousing$prob_AboveExpected
+)
+
+# Plot ROC curve
+plot(
+  roc_obj,
+  main = "ROC Curve for AboveExpected Logistic Model",
+  col = "blue",
+  lwd = 2
+)
+abline(a = 0, b = 1, lty = 2, col = "red")
+
+# Compute AUC
+auc_val <- auc(roc_obj)
+auc_val
+```
+
+*ROC Curve & AUC Analysis*
+
+The ROC curve summarizes classifier performance across all possible
+probability cutoffs by plotting sensitivity against 1 − specificity.
+This avoids dependence on an arbitrary threshold such as 0.5.
+
+
+The AUC (Area Under the Curve) measures overall discrimination ability:
+the probability that the model assigns a higher predicted probability
+to a randomly chosen AboveExpected home than to a BelowExpected home.
+
+
+An AUC of 0.5 corresponds to random guessing, while values closer to 1
+indicate stronger discriminatory power. Here, AUC ≈ 0.62 suggests
+modest but meaningful predictive ability beyond chance.
+
+
+This level of performance is expected given that AboveExpected is defined
+as a residual-based outcome and therefore contains substantial noise.
+
+### Module 5E: Odds Ratios and Coefficient Visualization
+```{r}
+# Extract coefficients and confidence intervals
+logit_coef <- coef(logit_model)
+logit_ci  <- confint(logit_model)
+
+# Convert to odds ratios
+odds_ratios <- exp(logit_coef)
+odds_ci <- exp(logit_ci)
+
+# Tidy table
+or_plot_data <- data.frame(
+  Term  = names(odds_ratios),
+  OddsRatio = odds_ratios,
+  CI_Lower = odds_ci[, 1],
+  CI_Upper = odds_ci[, 2],
+  row.names = NULL
+)
+
+# Remove non-finite values
+or_plot_data <- or_plot_data |>
+  filter(is.finite(OddsRatio),
+         is.finite(CI_Lower),
+         is.finite(CI_Upper))
+
+# Log-scale transformation
+or_plot_data <- or_plot_data |>
+  mutate(
+    logOR = log(OddsRatio),
+    logCI_Lower = log(CI_Lower),
+    logCI_Upper = log(CI_Upper)
+  )
+
+# Plot log-odds ratios with 95% CI
+ggplot(or_plot_data,
+       aes(x = logOR,
+           y = reorder(Term, logOR))) +
+  geom_point(size = 2) +
+  geom_errorbarh(
+    aes(xmin = logCI_Lower, xmax = logCI_Upper),
+    height = 0.2
+  ) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "red") +
+  labs(
+    title = "Log-Odds Ratios for AboveExpected (Logistic Model)",
+    x = "Log Odds Ratio",
+    y = "Predictor"
+  ) +
+  theme_minimal()
+```
+
+*Log-odds ratio interpretation*
+
+Points represent estimated log-odds ratios and horizontal lines show
+95% confidence intervals from the logistic regression predicting whether
+a home sells above its OLS-predicted price.
+
+
+The vertical reference line at 0 indicates no effect on the odds of
+selling above expected. Most neighborhood coefficients are centered
+near zero with confidence intervals crossing zero, indicating limited
+additional neighborhood effects once baseline price expectations are
+accounted for in the OLS model.
+
+
+Structural variables such as Total.Bsmt.SF show a small positive effect,
+while Overall.Qual has a negative log-odds ratio, reflecting that higher
+quality homes are less likely to exceed their predicted price because
+quality is already incorporated into the expected value.
+
+
+Overall, the plot shows substantial uncertainty in individual effects
+and confirms that above-expected sales are only weakly predictable,
+consistent with the residual-based nature of the outcome.
+
+### Module 6: Bootstrap Inference for Mean log(SalePrice)
+Using a nonparametric bootstrap to estimate uncertainty
+in the mean log-transformed SalePrice. Bootstrapping avoids
+reliance on normality assumptions and is appropriate given
+the skewed distribution of housing prices.
+
+```{r}
+B <- 10000  # number of bootstrap samples
+n <- nrow(AmesHousing)
+
+boot_means <- numeric(B)
+
+for (b in 1:B) {
+  sample_indices <- sample(1:n, size = n, replace = TRUE)
+  boot_sample <- AmesHousing$logSalePrice[sample_indices]
+  boot_means[b] <- mean(boot_sample)
+}
+
+summary(boot_means)
+```
+
+The bootstrap distribution of the mean log(SalePrice)
+is approximately symmetric and tightly concentrated,
+indicating stable estimation of the population mean.
+
+```{r}
+# 95% bootstrap percentile CI on log scale
+ci_log <- quantile(boot_means, probs = c(0.025, 0.975))
+ci_log
+
+# Back-transform to SalePrice scale
+ci_price <- 10^ci_log
+ci_price
+```
+
+The back-transformed interval provides a 95% confidence
+interval for the mean SalePrice on the original dollar scale.
+This corresponds to a geometric mean interpretation due
+to the log transformation.
+
+```{r}
+#Bootstrap Distribution Visualization
+hist(
+  boot_means,
+  breaks = 40,
+  main = "Bootstrap Distribution of Mean log(SalePrice)",
+  xlab = "Mean log10(SalePrice)",
+  col = "lightgray",
+  border = "white"
+)
+abline(v = ci_log, col = "red", lwd = 2, lty = 2)
+```
+
+### Illustrative example: interpretation for a single home
+```{r example observation}
+# Selecting a single example home
+example_home <- AmesHousing[1, ]
+
+# Predicting probability of selling above expected price
+example_prob <- predict(
+logit_model,
+newdata = example_home,
+type = "response"
+)
+
+example_prob
+```
+For this particular house, the logistic model predicts about a 54% chance that it'll sell for more than what the OLS model expects. So it's slightly more likely than not to beat the predicted price given what we know about the property. This example shows how we can use the model to make predictions for individual homes, not just look at overall patterns.
+
+## Summary of Findings
+The OLS model captures a substantial portion of the variation in housing prices, with overall quality, above-ground living area, and neighborhood standing out as the key drivers. While neighborhood effects are significant, they don't completely explain price differences once we account for the physical characteristics of the homes.
+
+The logistic regression model predicts whether a home will sell above its expected price and shows moderate discriminatory power (AUC ≈ 0.63). This modest performance makes sense given that we're trying to predict residuals, which are inherently noisy, and it suggests there's limited information beyond what the baseline OLS model already captures.
+
+Bootstrap inference for the mean log(SalePrice) proves to be stable and gives us reliable confidence intervals when we convert back to the dollar scale. Overall, the analysis confirms that structural features and location are the dominant factors in determining housing prices, while predicting which homes will outperform expectations remains challenging.
+

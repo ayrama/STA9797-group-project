@@ -1,0 +1,242 @@
+---
+title: "Understanding the Dynamics of Housing Prices"
+author: "Saadman Chowdhury, Brandon Kokin, Ayrat Aymetov"
+format: pptx
+---
+
+```{r setup, include=FALSE}
+library(ggplot2)
+library(dplyr)
+library(broom)
+library(pROC)
+set.seed(123)
+
+AmesHousing <- read.csv("C:/Users/ayram/Desktop/Fall2025_Baruch/STA_9797/Final project/GitHub_repo/STA9797-group-project/data/AmesHousing.csv")
+AmesHousing$logSalePrice <- log10(AmesHousing$SalePrice)
+```
+
+```{r models, include=FALSE}
+# Minimal preprocessing needed for the models used in slides
+AmesHousing <- AmesHousing |>
+  dplyr::filter(!is.na(SalePrice)) |>
+  dplyr::mutate(
+    Total.Bsmt.SF = ifelse(is.na(Total.Bsmt.SF), 0, Total.Bsmt.SF),
+    Garage.Cars   = ifelse(is.na(Garage.Cars),   0, Garage.Cars),
+    Neighborhood  = factor(Neighborhood),
+    logSalePrice  = log10(SalePrice)
+  )
+
+# OLS model (used in Slides 7–8)
+ols_model <- lm(
+  logSalePrice ~ Neighborhood +
+    Overall.Qual +
+    Gr.Liv.Area +
+    Total.Bsmt.SF +
+    Garage.Cars +
+    House.Style,
+  data = AmesHousing
+)
+
+AmesHousing$fitted_logPrice <- fitted(ols_model)
+
+# AboveExpected (used in Slide 9)
+AmesHousing$AboveExpected <- as.integer(AmesHousing$logSalePrice > AmesHousing$fitted_logPrice)
+
+# Logistic model + probabilities (used in Slide 9)
+logit_model <- glm(
+  AboveExpected ~ Neighborhood +
+    Overall.Qual +
+    Gr.Liv.Area +
+    Total.Bsmt.SF +
+    Garage.Cars +
+    House.Style,
+  data = AmesHousing,
+  family = binomial(link = "logit")
+)
+
+AmesHousing$prob_AboveExpected <- predict(logit_model, type = "response")
+```
+
+## Motivation and Overview
+
+- Housing prices reflect both **structural attributes** and **location effects**
+- Understanding price drivers is critical for buyers, sellers, and investors
+- This project combines **explanatory** and **predictive** modeling approaches
+
+**Methods used:**
+- ANOVA and OLS regression
+- Logistic regression
+- Bootstrap inference
+
+---
+
+## Research Objectives
+
+- Identify key factors influencing housing prices
+- Quantify neighborhood effects beyond structural characteristics
+- Classify homes as selling **above** or **below** expected value
+- Assess model uncertainty using nonparametric bootstrap methods
+
+---
+
+## Dataset Overview
+
+- **Ames Housing dataset** (De Cock, 2011)
+- 2,930 residential property sales in Ames, Iowa
+- 82 variables:
+  - Nominal, ordinal, discrete, and continuous features
+- Rich representation of housing structure and neighborhood context
+
+---
+
+## Data Preparation and Modeling Framework
+
+- **Primary drivers:** Neighborhood, Overall quality, Living area  
+- **Secondary drivers:** Basement area, Garage capacity, Architectural style  
+- **Responses:**  
+  - `log(SalePrice)` — explanatory modeling  
+  - `AboveExpected` — classification
+
+---
+
+## Why log(SalePrice)?
+
+- Raw SalePrice distribution is **strongly right-skewed**
+- Variance increases with price, violating OLS assumptions
+- Log transformation stabilizes variance and improves normality
+
+```{r, echo=FALSE}
+par(mfrow = c(1, 2), mar = c(4, 4, 2, 1))
+
+hist(AmesHousing$SalePrice,
+     breaks = 40,
+     main = "SalePrice",
+     xlab = "SalePrice")
+
+hist(log(AmesHousing$SalePrice),
+     breaks = 40,
+     main = "log(SalePrice)",
+     xlab = "log(SalePrice)")
+
+par(mfrow = c(1, 1))
+```
+
+---
+
+## Neighborhood Effects: ANOVA
+
+- One-way ANOVA confirms **significant price differences** across neighborhoods
+- Strong evidence of spatial heterogeneity
+- Differences persist even before controlling for structure
+
+```{r, echo=FALSE}
+boxplot(
+  logSalePrice ~ Neighborhood,
+  data = AmesHousing,
+  las = 2,
+  main = "log(SalePrice) by Neighborhood",
+  ylab = "log10(SalePrice)"
+)
+```
+
+---
+
+## Baseline OLS Model Results
+
+- OLS explains a large share of price variation
+(Adjusted R² ≈ 0.84)
+
+- Dominant predictors:
+  - Overall quality
+  - Above-ground living area
+  - Neighborhood
+
+- Effects persist after controlling for structure
+
+```{r}
+tidy(ols_model) |>
+filter(term %in% c("Overall.Qual", "Gr.Liv.Area", "Total.Bsmt.SF")) |>
+ggplot(aes(x = estimate, y = term)) +
+geom_point(size = 3) +
+geom_vline(xintercept = 0, linetype = "dashed") +
+labs(
+title = "Key OLS Coefficient Estimates",
+x = "Coefficient Estimate",
+y = ""
+)
+```
+
+---
+
+## OLS Diagnostics
+
+- Linearity assumption appears reasonable
+- No strong evidence of heteroscedasticity after log transformation
+- No single observation unduly influences results
+```{r}
+plot(
+ols_model$fitted.values,
+ols_model$residuals,
+main = "Residuals vs Fitted Values",
+xlab = "Fitted log(SalePrice)",
+ylab = "Residuals"
+)
+abline(h = 0, col = "red", lwd = 2)
+```
+
+---
+
+## Predicting Above-Expected Sales
+
+- Define AboveExpected relative to OLS-predicted price
+- Logistic regression estimates probability of selling above expected value
+- Residual-based outcome introduces inherent noise
+
+```{r}
+roc_obj <- roc(
+response  = AmesHousing$AboveExpected,
+predictor = AmesHousing$prob_AboveExpected
+)
+
+plot(
+roc_obj,
+main = "ROC Curve for AboveExpected Classification",
+col = "blue",
+lwd = 2
+)
+abline(a = 0, b = 1, lty = 2, col = "red")
+```
+
+---
+
+## Bootstrap Inference & Key Takeaways
+
+```{r bootstrap, include=FALSE}
+B <- 10000
+n <- nrow(AmesHousing)
+
+boot_means <- numeric(B)
+
+for (b in 1:B) {
+  idx <- sample(seq_len(n), size = n, replace = TRUE)
+  boot_means[b] <- mean(AmesHousing$logSalePrice[idx])
+}
+
+ci_log <- quantile(boot_means, probs = c(0.025, 0.975))
+```
+
+- OLS performs well for explanation
+- Classification highlights market noise
+- Bootstrap provides robust uncertainty quantification
+
+```{r, fig.height=4, fig.width=8, echo=FALSE}
+hist(
+  boot_means,
+  breaks = 40,
+  main = "Bootstrap Distribution of Mean log(SalePrice)",
+  xlab = "Mean log10(SalePrice)",
+  col = "lightgray"
+)
+abline(v = ci_log, col = "red", lwd = 2, lty = 2)
+```
+
